@@ -30,6 +30,12 @@ from neutron.services.loadbalancer import constants
 PROTOCOL_MAP = {
     constants.PROTOCOL_TCP: 'tcp',
     constants.PROTOCOL_HTTP: 'http',
+    constants.PROTOCOL_HTTPS: 'tcp',
+}
+
+POOL_PROTOCOL_MAP = {
+    constants.PROTOCOL_TCP: 'http',
+    constants.PROTOCOL_HTTP: 'http',
     constants.PROTOCOL_HTTPS: 'https',
 }
 
@@ -45,13 +51,15 @@ INACTIVE = qconstants.INACTIVE
 
 def save_config(conf_path, logical_config):
     """Convert a logical configuration to the SEnginx version."""
-    protocol = logical_config['pool']['protocol']
+    protocol = logical_config['vip']['protocol']
+    if not protocol:
+        return
 
     data = []
     data.extend(_build_global(logical_config))
 
     # build protocol specified configs
-    if PROTOCOL_MAP[protocol] == "http" or PROTOCOL_MAP[protocol] == "https":
+    if PROTOCOL_MAP[protocol] == "http":
         data.extend(_build_http(logical_config))
     else:
         data.extend(_build_tcp(logical_config))
@@ -75,13 +83,11 @@ def _build_global(config):
 
 
 def _build_http(config):
-    lb_method = config['pool']['lb_method']
-
     opts = [
             'http {',
             'include /usr/local/senginx/conf/mime.types;',
             'default_type /usr/local/senginx/conf/application/octet-stream;',
-            'access_log access.log;',
+            'access_log http.access.log;',
             'sendfile on;',
             'keepalive_timeout 65;',
             ' ',
@@ -106,7 +112,7 @@ def _build_http_upstream(config):
     ]
 
     if lb_method != constants.LB_METHOD_ROUND_ROBIN:
-        opts.append('%s' % BALANCE_MAP.get(lb_method))
+        opts.append('%s;' % BALANCE_MAP.get(lb_method))
 
     opts.append('')
 
@@ -132,7 +138,7 @@ def _build_http_upstream(config):
 
 
 def _build_http_server(config):
-    protocol = config['pool']['protocol']
+    pool_protocol = config['pool']['protocol']
 
     if not config['members']:
         return []
@@ -145,7 +151,8 @@ def _build_http_server(config):
         ),
         '',
         'location / {',
-        'proxy_pass %s://%s;' % (PROTOCOL_MAP[protocol], config['pool']['id']),
+        'proxy_pass %s://%s;' %
+        (POOL_PROTOCOL_MAP[pool_protocol], config['pool']['id']),
         '}',
     ]
 
@@ -162,10 +169,9 @@ def _build_http_server(config):
 
 
 def _build_tcp(config):
-    lb_method = config['pool']['lb_method']
-
     opts = [
             'tcp {',
+            'access_log tcp.access.log;',
             ' ',
             ]
 
@@ -188,19 +194,22 @@ def _build_tcp_upstream(config):
     ]
 
     if lb_method == constants.LB_METHOD_SOURCE_IP:
-        opts.append('%s' % BALANCE_MAP.get(lb_method))
+        opts.append('%s;' % BALANCE_MAP.get(lb_method))
 
     opts.append('')
 
     # add session persistence (if available)
-    persist_opts = _get_session_persistence(config)
-    opts.extend(persist_opts)
+    #persist_opts = _get_session_persistence(config)
+    #opts.extend(persist_opts)
 
     # add the members
     for member in config['members']:
         if member['status'] in (ACTIVE, INACTIVE) and member['admin_state_up']:
-            server = (('server %(address)s:%(protocol_port)s '
-                       'weight=%(weight)s;') % member)
+            server = (('server %(address)s:%(protocol_port)s') % member)
+            if lb_method == constants.LB_METHOD_ROUND_ROBIN:
+                server = server + ((' weight=%(weight)s;') % member)
+            else:
+                server = server + ';'
             opts.append(server)
 
     # add the first health_monitor (if available)
@@ -214,7 +223,6 @@ def _build_tcp_upstream(config):
 
 
 def _build_tcp_server(config):
-
     if not config['members']:
         return []
 
