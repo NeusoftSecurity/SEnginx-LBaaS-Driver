@@ -1,6 +1,7 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 #
 # Copyright 2013 New Dream Network, LLC (DreamHost)
+# Copyright 2014 Neusoft Corporation (Neusoft)
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -15,6 +16,7 @@
 #    under the License.
 #
 # @author: Mark McClain, DreamHost
+# @author: Paul Yang, Neusoft
 
 import eventlet
 from oslo.config import cfg

@@ -1,6 +1,7 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 #
 # Copyright 2013 New Dream Network, LLC (DreamHost)
+# Copyright 2014 Neusoft Corporation (Neusoft)
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -15,6 +16,7 @@
 #    under the License.
 #
 # @author: Mark McClain, DreamHost
+# @author: Paul Yang, Neusoft
 
 import itertools
 
@@ -37,77 +39,67 @@ BALANCE_MAP = {
     constants.LB_METHOD_SOURCE_IP: 'ip_hash'
 }
 
-STATS_MAP = {
-    constants.STATS_ACTIVE_CONNECTIONS: 'qcur',
-    constants.STATS_MAX_CONNECTIONS: 'qmax',
-    constants.STATS_CURRENT_SESSIONS: 'scur',
-    constants.STATS_MAX_SESSIONS: 'smax',
-    constants.STATS_TOTAL_SESSIONS: 'stot',
-    constants.STATS_IN_BYTES: 'bin',
-    constants.STATS_OUT_BYTES: 'bout',
-    constants.STATS_CONNECTION_ERRORS: 'econ',
-    constants.STATS_RESPONSE_ERRORS: 'eresp'
-}
-
 ACTIVE = qconstants.ACTIVE
 INACTIVE = qconstants.INACTIVE
 
 
 def save_config(conf_path, logical_config):
     """Convert a logical configuration to the SEnginx version."""
+    protocol = logical_config['pool']['protocol']
+
     data = []
     data.extend(_build_global(logical_config))
-    data.extend(_build_defaults(logical_config))
-    data.extend(_build_backend(logical_config))
-    data.extend(_build_frontend(logical_config))
+
+    # build protocol specified configs
+    if PROTOCOL_MAP[protocol] == "http" or PROTOCOL_MAP[protocol] == "https":
+        data.extend(_build_http(logical_config))
+    else:
+        data.extend(_build_tcp(logical_config))
+
     utils.replace_file(conf_path, '\n'.join(data))
 
 
-#TODO: reimplement all of the config-builder into more SEnginx native style
-# e.g., implement a http builder, an upstream builder, a server builder...
-
-
-def _build_global(config, socket_path=None):
+def _build_global(config):
     opts = [
-        'user senginx %s;' % cfg.CONF.user_group,
-        'worker_processes 1;',
-        'error_log error.log;',
-        'pid nginx.pid;',
-        'events {',
-        'worker_connections 10240;',
-        '}',
-        '',
-    ]
+            'user senginx %s;' % cfg.CONF.user_group,
+            'worker_processes 1;',
+            'error_log error.log;',
+            'pid nginx.pid;',
+            'events {',
+            'worker_connections 10240;',
+            '}',
+            '',
+            ]
 
     return opts
 
 
-def _build_defaults(config):
-    protocol = config['pool']['protocol']
+def _build_http(config):
     lb_method = config['pool']['lb_method']
 
-    if PROTOCOL_MAP[protocol] == "http" or PROTOCOL_MAP[protocol] == "https":
-        opts = [
+    opts = [
             'http {',
             'include /usr/local/senginx/conf/mime.types;',
             'default_type /usr/local/senginx/conf/application/octet-stream;',
-            'access_log off;',
-            'sendfile        on;',
-            'keepalive_timeout  65;',
+            'access_log access.log;',
+            'sendfile on;',
+            'keepalive_timeout 65;',
             ' ',
-        ]
-    else:
-        opts = [
-            'tcp {',
-            ' ',
-        ]
+            ]
+
+    opts.extend(_build_http_upstream(config));
+    opts.extend(_build_http_server(config));
+
+    opts.append('}')
 
     return opts
 
 
-def _build_backend(config):
-    protocol = config['pool']['protocol']
+def _build_http_upstream(config):
     lb_method = config['pool']['lb_method']
+
+    if not config['members']:
+        return []
 
     opts = [
         'upstream %s {' % config['pool']['id'],
@@ -120,7 +112,7 @@ def _build_backend(config):
 
     # add session persistence (if available)
     persist_opts = _get_session_persistence(config)
-    #opts.extend(persist_opts)
+    opts.extend(persist_opts)
 
     # add the members
     for member in config['members']:
@@ -131,7 +123,7 @@ def _build_backend(config):
 
     # add the first health_monitor (if available)
     health_opts = _get_server_health_option(config)
-    #opts.extend(health_opts)
+    opts.extend(health_opts)
 
     opts.append('}')
     opts.append('')
@@ -139,8 +131,11 @@ def _build_backend(config):
     return opts
 
 
-def _build_frontend(config):
+def _build_http_server(config):
     protocol = config['pool']['protocol']
+
+    if not config['members']:
+        return []
 
     opts = [
         'server {',
@@ -152,7 +147,85 @@ def _build_frontend(config):
         'location / {',
         'proxy_pass %s://%s;' % (PROTOCOL_MAP[protocol], config['pool']['id']),
         '}',
-        '}',
+    ]
+
+    if config['healthmonitors']:
+        opts.append('location /senginx-check-http-status {');
+        opts.append('check_status csv;');
+        opts.append('}');
+
+
+    opts.append('}');
+    opts.append('');
+
+    return opts
+
+
+def _build_tcp(config):
+    lb_method = config['pool']['lb_method']
+
+    opts = [
+            'tcp {',
+            ' ',
+            ]
+
+    opts.extend(_build_tcp_upstream(config));
+    opts.extend(_build_tcp_server(config));
+
+    opts.append('}')
+
+    return opts
+
+
+def _build_tcp_upstream(config):
+    lb_method = config['pool']['lb_method']
+
+    if not config['members']:
+        return []
+
+    opts = [
+        'upstream %s {' % config['pool']['id'],
+    ]
+
+    if lb_method == constants.LB_METHOD_SOURCE_IP:
+        opts.append('%s' % BALANCE_MAP.get(lb_method))
+
+    opts.append('')
+
+    # add session persistence (if available)
+    persist_opts = _get_session_persistence(config)
+    opts.extend(persist_opts)
+
+    # add the members
+    for member in config['members']:
+        if member['status'] in (ACTIVE, INACTIVE) and member['admin_state_up']:
+            server = (('server %(address)s:%(protocol_port)s '
+                       'weight=%(weight)s;') % member)
+            opts.append(server)
+
+    # add the first health_monitor (if available)
+    health_opts = _get_server_health_option(config)
+    opts.extend(health_opts)
+
+    opts.append('}')
+    opts.append('')
+
+    return opts
+
+
+def _build_tcp_server(config):
+
+    if not config['members']:
+        return []
+
+    opts = [
+        'server {',
+        'listen %s:%d;' % (
+            _get_first_ip_from_port(config['vip']['port']),
+            config['vip']['protocol_port']
+        ),
+        '',
+        'proxy_pass %s;' % config['pool']['id'],
         '}',
         ''
     ]
@@ -175,25 +248,31 @@ def _get_server_health_option(config):
         if monitor['admin_state_up']:
             break
     else:
-        return '', []
+        return []
 
-    server_addon = ' check inter %(delay)ds fall %(max_retries)d' % monitor
-    opts = [
-        'timeout check %ds' % monitor['timeout']
-    ]
+    opts = []
 
-    if monitor['type'] in (constants.HEALTH_MONITOR_HTTP,
-                           constants.HEALTH_MONITOR_HTTPS):
-        opts.append('option httpchk %(http_method)s %(url_path)s' % monitor)
-        opts.append(
-            'http-check expect rstatus %s' %
-            '|'.join(_expand_expected_codes(monitor['expected_codes']))
-        )
+    delay = int(monitor['delay']) * 1000
+    timeout = int(monitor['timeout']) * 1000
 
-    if monitor['type'] == constants.HEALTH_MONITOR_HTTPS:
-        opts.append('option ssl-hello-chk')
+    if monitor['type'] == constants.HEALTH_MONITOR_HTTP:
+        opts.append('check interval=%d fall=%d'
+                    ' timeout=%d type=http;' %
+                    (delay, monitor['max_retries'], timeout))
+        opts.append('check_http_send "%(http_method)s %(url_path)s '
+                    'HTTP/1.0\\r\\n\\r\\n";' % monitor)
+        opts.append('check_http_expect_alive %s;' %
+                    ' '.join(_expand_expected_codes(monitor['expected_codes'])))
+    elif monitor['type'] == constants.HEALTH_MONITOR_HTTPS:
+        opts.append('check interval=%d fall=%d'
+                    ' timeout=%d type=ssl_hello;' %
+                    (delay, monitor['max_retries'], timeout))
+    elif monitor['type'] == constants.HEALTH_MONITOR_TCP:
+        opts.append('check interval=%d fall=%d'
+                    ' timeout=%d type=tcp;' %
+                    (delay, monitor['max_retries'], timeout))
 
-    return server_addon, opts
+    return opts
 
 
 def _get_session_persistence(config):
@@ -203,40 +282,53 @@ def _get_session_persistence(config):
 
     opts = []
     if persistence['type'] == constants.SESSION_PERSISTENCE_SOURCE_IP:
-        opts.append('stick-table type ip size 10k')
-        opts.append('stick on src')
+        # XXX: no source ip persistence is availiable currently
+        return opts
     elif persistence['type'] == constants.SESSION_PERSISTENCE_HTTP_COOKIE:
-        opts.append('cookie SRV insert indirect nocache')
+        opts.append('persistence insert_cookie cookie_name=senginx timeout=30;')
     elif (persistence['type'] == constants.SESSION_PERSISTENCE_APP_COOKIE and
           persistence.get('cookie_name')):
-        opts.append('appsession %s len 56 timeout 3h' %
-                    persistence['cookie_name'])
+        opts.append('persistence insert_cookie cookie_name=senginx ' \
+                'monitor_cookie=%s timeout=30;' %
+                persistence['cookie_name'])
 
     return opts
 
 
-def _has_http_cookie_persistence(config):
-    return (config['vip'].get('session_persistence') and
-            config['vip']['session_persistence']['type'] ==
-            constants.SESSION_PERSISTENCE_HTTP_COOKIE)
-
-
 def _expand_expected_codes(codes):
-    """Expand the expected code string in set of codes.
+    """SEnginx does not support single response code,
+    it only supports 2xx, 3xx, 4xx and 5xx.
 
-    200-204 -> 200, 201, 202, 204
-    200, 203 -> 200, 203
+    500 -> http_5xx
+    200-204 -> http_2xx
+    200, 203 -> http_2xx
+    300, 304 -> http_3xx
+    200-304 -> http_2xx http_3xx
+    200, 304 -> http_2xx http_3xx
+    ...
     """
 
-    retval = set()
-    for code in codes.replace(',', ' ').split(' '):
-        code = code.strip()
+    l_codes = []
+    retval = []
 
-        if not code:
-            continue
-        elif '-' in code:
-            low, hi = code.split('-')[:2]
-            retval.update(str(i) for i in xrange(int(low), int(hi) + 1))
-        else:
-            retval.add(code)
-    return retval
+    if '-' in codes:
+        low, hi = codes.split('-')[:2]
+        for i in range(int(low), int(hi) + 1):
+            l_codes.append(str(i))
+    else:
+        l_codes = codes.replace(',', ' ').split(' ')
+
+    for code in l_codes:
+        code = code.strip()
+        i_code = int(code)
+
+        if i_code >= 200 and i_code < 300:
+            retval.append('http_2xx')
+        elif i_code >= 300 and i_code < 400:
+            retval.append('http_3xx')
+        elif i_code >= 400 and i_code < 500:
+            retval.append('http_4xx')
+        elif i_code >= 500 and i_code < 600:
+            retval.append('http_5xx')
+
+    return list(set(retval))
