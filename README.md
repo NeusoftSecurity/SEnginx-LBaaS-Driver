@@ -10,9 +10,9 @@ Only supports Havana version.
 
 ##### 1. Download and install the SEnginx LBaaS driver on both network node and controller node:
 
-      git clone https://github.com/NeusoftSecurity/SEnginx-LBaaS-Driver
-      cd SEnginx-LBaaS-Driver
-      python setup.py install
+      # git clone https://github.com/NeusoftSecurity/SEnginx-LBaaS-Driver
+      # cd SEnginx-LBaaS-Driver
+      # python setup.py install
 
 ##### 2. On your controller node:
    
@@ -61,4 +61,6 @@ Current version of this driver has some limitations:
 
 2. If a vip's protocol is set to "HTTPS", SEnginx will use tcp protocol to proxy the traffic. This is because SEnginx can't offload SSL traffic without certificates assigned;
 
-3. Currently, the driver's get_stats method is no implemented. 
+3. Currently, the driver's get_stats method is no implemented;
+
+4. Tests suite is not provided yet.
