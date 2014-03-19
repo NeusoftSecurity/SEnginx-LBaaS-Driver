@@ -1,0 +1,5 @@
+*.pyc
+.venv
+covhtml
+run_tests.log
+.coverage
